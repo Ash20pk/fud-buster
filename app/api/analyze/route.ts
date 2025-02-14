@@ -57,6 +57,7 @@ export async function POST(req: Request) {
                 encoder.encode(
                   `data: ${JSON.stringify({
                     type: "agent",
+                    coinName,
                     steps
                   })}\n\n`
                 )
@@ -67,6 +68,7 @@ export async function POST(req: Request) {
                 encoder.encode(
                   `data: ${JSON.stringify({
                     type: "agent",
+                    coinName,
                     content: content
                   })}\n\n`
                 )
@@ -96,6 +98,7 @@ export async function POST(req: Request) {
               encoder.encode(
                 `data: ${JSON.stringify({
                   type: "tools",
+                  coinName,
                   content: toolContent
                 })}\n\n`
               )
@@ -109,6 +112,7 @@ export async function POST(req: Request) {
         console.error('Streaming error:', error);
         const errorMessage = `data: ${JSON.stringify({
           type: "error",
+          coinName,
           content: "Analysis failed"
         })}\n\n`;
         await writer.write(encoder.encode(errorMessage));

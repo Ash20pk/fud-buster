@@ -1,6 +1,4 @@
 import { Tool } from "@langchain/core/tools";
-import { ChatOpenAI } from "@langchain/openai";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { NewsCache, ArticleMetrics, SocialCache } from "@/services/types/api";
 
 // Rate limiter implementation
@@ -448,198 +446,181 @@ export class SocialDataTool extends Tool {
     }
 }
 
-export interface MarketStats {
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume: number;
-    vwap: number;
-    timestamp: number;
-    transactions: number;
-    market_cap?: number;
-}
-
-export interface TechnicalIndicators {
-    rsi?: number;
-    macd?: {
-        macd: number;
-        signal: number;
-        histogram: number;
-    };
-    ema_20?: number;
-    ema_50?: number;
-    sma_200?: number;
-}
-
-export interface MarketAnalysis {
-    symbol: string;
-    stats: MarketStats;
-    indicators: TechnicalIndicators;
-    price_change_24h: number;
-    price_change_7d?: number;
-}
-
-export class MarketDataTool extends Tool {
-    name = "market_data";
-    description = "Analyzes cryptocurrency market data and technical indicators";
+export class PriceTool extends Tool {
+    name = "price_data";
+    description = "Fetches current cryptocurrency price data using CoinGecko. Use this format bitcoin for Bitcoin, ethereum for Ethereum, etc.";
     private rateLimiter: RateLimiter;
-    private cache: Map<string, { timestamp: number; data: MarketAnalysis }>;
+    private cache: Map<string, { timestamp: number; data: any }>;
     private readonly CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
-    private readonly BASE_URL = "https://api.coingecko.com/api/v3";
+    private readonly COINGECKO_URL = "https://api.coingecko.com/api/v3";
 
     constructor() {
         super();
-        this.rateLimiter = new RateLimiter(10); // CoinGecko allows more requests per second
+        this.rateLimiter = new RateLimiter(10);
         this.cache = new Map();
     }
 
-    private async fetchData(endpoint: string): Promise<any> {
-        const url = `${this.BASE_URL}${endpoint}`;
-        const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`CoinGecko API Error: ${response.status} ${response.statusText}`);
-        }
-        return response.json();
+    private mapSymbolToCoinId(symbol: string): string {
+        const symbolMap: {[key: string]: string} = {
+            'btc': 'bitcoin',
+            'eth': 'ethereum',
+            'bnb': 'binancecoin',
+            'xrp': 'ripple',
+            'ada': 'cardano',
+            'sol': 'solana'
+        };
+        return symbolMap[symbol.toLowerCase()] || symbol.toLowerCase();
     }
 
-    private async getMarketData(symbol: string): Promise<any> {
-        // Convert common symbols to CoinGecko IDs
-        const coinId = symbol.toLowerCase() === 'btc' ? 'bitcoin' : 
-                      symbol.toLowerCase() === 'eth' ? 'ethereum' : 
-                      symbol.toLowerCase();
-        
-        const endpoint = `/coins/${coinId}/market_chart?vs_currency=usd&days=7&interval=daily`;
-        return this.fetchData(endpoint);
-    }
-
-    private async getCurrentPrice(symbol: string): Promise<any> {
-        const coinId = symbol.toLowerCase() === 'btc' ? 'bitcoin' : 
-                      symbol.toLowerCase() === 'eth' ? 'ethereum' : 
-                      symbol.toLowerCase();
-        
-        const endpoint = `/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_vol=true&include_24hr_change=true&include_7d_change=true`;
-        return this.fetchData(endpoint);
-    }
-
-    private calculateRSI(prices: number[], period: number = 14): number {
-        if (prices.length < period + 1) {
-            return 0;
-        }
-
-        let gains = 0;
-        let losses = 0;
-
-        for (let i = 1; i <= period; i++) {
-            const difference = prices[i] - prices[i - 1];
-            if (difference >= 0) {
-                gains += difference;
-            } else {
-                losses -= difference;
-            }
-        }
-
-        const avgGain = gains / period;
-        const avgLoss = losses / period;
-        const rs = avgGain / avgLoss;
-        return 100 - (100 / (1 + rs));
-    }
-
-    private calculateEMA(prices: number[], period: number): number[] {
-        const ema: number[] = [];
-        const multiplier = 2 / (period + 1);
-
-        // Start with SMA
-        let sum = 0;
-        for (let i = 0; i < period; i++) {
-            sum += prices[i];
-        }
-        ema.push(sum / period);
-
-        // Calculate EMA
-        for (let i = period; i < prices.length; i++) {
-            ema.push((prices[i] - ema[ema.length - 1]) * multiplier + ema[ema.length - 1]);
-        }
-
-        return ema;
-    }
-
-    public async analyze(symbol: string): Promise<MarketAnalysis> {
-        const cacheKey = `${symbol.toLowerCase()}_analysis`;
+    public async fetchPrice(symbol: string): Promise<any> {
+        const cacheKey = `${symbol.toLowerCase()}_price`;
         const cachedData = this.cache.get(cacheKey);
 
         if (cachedData && Date.now() - cachedData.timestamp < this.CACHE_DURATION) {
             return cachedData.data;
         }
 
-        try {
-            await this.rateLimiter.waitForNext();
+        await this.rateLimiter.waitForNext();
 
-            const [marketData, currentPrice] = await Promise.all([
-                this.getMarketData(symbol),
-                this.getCurrentPrice(symbol)
-            ]);
-
-            const coinId = symbol.toLowerCase() === 'btc' ? 'bitcoin' : 
-                          symbol.toLowerCase() === 'eth' ? 'ethereum' : 
-                          symbol.toLowerCase();
-
-            const prices = marketData.prices.map((p: number[]) => p[1]);
-            const volumes = marketData.total_volumes.map((v: number[]) => v[1]);
-            
-            const latestPrice = currentPrice[coinId].usd;
-            const priceChange24h = currentPrice[coinId].usd_24h_change;
-            const priceChange7d = currentPrice[coinId].usd_7d_change;
-            const volume24h = currentPrice[coinId].usd_24h_vol;
-
-            // Calculate technical indicators
-            const rsi = this.calculateRSI(prices);
-            const ema20 = this.calculateEMA(prices, 20);
-            const ema50 = this.calculateEMA(prices, 50);
-
-            const analysis: MarketAnalysis = {
-                symbol: symbol.toUpperCase(),
-                stats: {
-                    open: prices[prices.length - 2], // Yesterday's close
-                    high: Math.max(...prices.slice(-2)),
-                    low: Math.min(...prices.slice(-2)),
-                    close: latestPrice,
-                    volume: volume24h,
-                    vwap: prices.reduce((a, b) => a + b, 0) / prices.length,
-                    timestamp: Date.now(),
-                    transactions: 0 // Not available in CoinGecko's free API
-                },
-                indicators: {
-                    rsi,
-                    ema_20: ema20[ema20.length - 1],
-                    ema_50: ema50[ema50.length - 1],
-                    macd: 0, // Simplified version without MACD for now
-                    signal: 0,
-                    histogram: 0
-                },
-                price_change_24h: priceChange24h,
-                price_change_7d: priceChange7d
-            };
-
-            this.cache.set(cacheKey, {
-                timestamp: Date.now(),
-                data: analysis
-            });
-
-            return analysis;
-        } catch (error) {
-            console.error('Market data fetch error:', error);
-            throw error;
+        const coinId = this.mapSymbolToCoinId(symbol);
+        const url = `${this.COINGECKO_URL}/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_vol=true&include_24hr_change=true&include_market_cap=true`;
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            throw new Error(`CoinGecko API Error: ${response.status} ${response.statusText}`);
         }
+        
+        const priceData = await response.json();
+        const processedData = {
+            symbol: symbol.toUpperCase(),
+            price: priceData[coinId].usd,
+            volume_24h: priceData[coinId].usd_24h_vol,
+            price_change_24h: priceData[coinId].usd_24h_change,
+            market_cap: priceData[coinId].usd_market_cap,
+            timestamp: Date.now()
+        };
+
+        this.cache.set(cacheKey, {
+            timestamp: Date.now(),
+            data: processedData
+        });
+
+        return processedData;
     }
 
     async _call(symbol: string): Promise<string> {
         try {
-            const analysis = await this.analyze(symbol);
-            return JSON.stringify(analysis, null, 2);
+            const priceData = await this.fetchPrice(symbol);
+            return JSON.stringify(priceData, null, 2);
         } catch (error) {
             if (error instanceof Error) {
-                throw new Error(`Failed to analyze market data: ${error.message}`);
+                throw new Error(`Failed to fetch price data: ${error.message}`);
+            }
+            throw error;
+        }
+    }
+}
+
+export class TechnicalAnalysisTool extends Tool {
+    name = "technical_analysis";
+    description = "Provides technical analysis indicators for cryptocurrencies using TAAPI.io. Use this format BTC for Bitcoin, ETH for Ethereum, etc.";
+    private rateLimiter: RateLimiter;
+    private cache: Map<string, { timestamp: number; data: any }>;
+    private readonly CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+    private readonly TAAPI_URL = "https://api.taapi.io/bulk";
+    private readonly TAAPI_SECRET = process.env.TAAPI_KEY || ""; // Use environment variable
+
+    constructor() {
+        super();
+        this.rateLimiter = new RateLimiter(10);
+        this.cache = new Map();
+    }
+
+    private findIndicatorValue(taapiData: any, id: string): any {
+        const indicator = taapiData.data.find((item: any) => item.id === id);
+        return indicator?.result || null;
+    }
+
+    public async fetchTechnicalIndicators(symbol: string): Promise<any> {
+        const cacheKey = `${symbol.toLowerCase()}_indicators`;
+        const cachedData = this.cache.get(cacheKey);
+
+        if (cachedData && Date.now() - cachedData.timestamp < this.CACHE_DURATION) {
+            return cachedData.data;
+        }
+
+        await this.rateLimiter.waitForNext();
+
+        const payload = {
+            secret: this.TAAPI_SECRET,
+            construct: {
+                exchange: "binance",
+                symbol: `${symbol}/USDT`,
+                interval: "1h",
+                indicators: [
+                    { id: "rsi", indicator: "rsi", period: 14 },
+                    { id: "bbands", indicator: "bbands", period: 20 },
+                    { id: "macd", indicator: "macd", optInFastPeriod: 12, optInSlowPeriod: 26, optInSignalPeriod: 9 },
+                    { id: "adx", indicator: "adx", period: 14 },
+                    { id: "obv", indicator: "obv" },
+                    { id: "ema", indicator: "ema", period: 20 },
+                    { id: "ema50", indicator: "ema", period: 50 },
+                    { id: "sma", indicator: "sma", period: 200 }
+                ]
+            }
+        };
+
+        const response = await fetch(this.TAAPI_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            throw new Error(`TAAPI Error: ${response.status} ${response.statusText}`);
+        }
+
+        const taapiData = await response.json();
+
+        const processedIndicators = {
+            symbol: symbol.toUpperCase(),
+            rsi: this.findIndicatorValue(taapiData, 'rsi')?.value || null,
+            macd: {
+                value: this.findIndicatorValue(taapiData, 'macd')?.valueMACD || null,
+                signal: this.findIndicatorValue(taapiData, 'macd')?.valueMACDSignal || null,
+                histogram: this.findIndicatorValue(taapiData, 'macd')?.valueMACDHist || null
+            },
+            bollinger_bands: {
+                upper: this.findIndicatorValue(taapiData, 'bbands')?.valueUpperBand || null,
+                middle: this.findIndicatorValue(taapiData, 'bbands')?.valueMiddleBand || null,
+                lower: this.findIndicatorValue(taapiData, 'bbands')?.valueLowerBand || null
+            },
+            adx: this.findIndicatorValue(taapiData, 'adx')?.value || null,
+            obv: this.findIndicatorValue(taapiData, 'obv')?.value || null,
+            ema: {
+                ema_20: this.findIndicatorValue(taapiData, 'ema')?.value || null,
+                ema_50: this.findIndicatorValue(taapiData, 'ema50')?.value || null
+            },
+            sma_200: this.findIndicatorValue(taapiData, 'sma')?.value || null,
+            timestamp: Date.now()
+        };
+
+        this.cache.set(cacheKey, {
+            timestamp: Date.now(),
+            data: processedIndicators
+        });
+
+        return processedIndicators;
+    }
+
+    async _call(symbol: string): Promise<string> {
+        try {
+            const technicalData = await this.fetchTechnicalIndicators(symbol);
+            return JSON.stringify(technicalData, null, 2);
+        } catch (error) {
+            if (error instanceof Error) {
+                throw new Error(`Failed to fetch technical indicators: ${error.message}`);
             }
             throw error;
         }
